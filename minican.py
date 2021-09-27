@@ -252,7 +252,7 @@ else:
 	G.config.read(inifile)
 	# Logging
 	if not os.path.isdir(G.config.get('Logging', 'log_dir')):
-		os.path.mkdir(G.config.get('Logging', 'log_dir'))
+		os.mkdir(G.config.get('Logging', 'log_dir'))
 	logging.basicConfig(filename=f"{G.config.get('Logging', 'log_dir')}/minican.log", level=logging.getLevelName(G.config.get('Logging', 'log_level')))
 	try:
 		testval = sys.argv[2]
