@@ -7,5 +7,6 @@ ExecStart=/usr/bin/python3 /opt/minidsp/minican.py /opt/minidsp/minican.ini
 KillSignal=SIGINT
 Restart=always
 
+
 [Install]
 WantedBy=multi-user.target
