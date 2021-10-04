@@ -3,28 +3,37 @@ from pprint import pprint
 
 class minictl():
 
-    def __init__(self, http_addr='127.0.0.1', http_port=5380, device=0):
+    def __init__(self, http_addr='127.0.0.1', http_port=5380, device=0, testmode=False):
         self.http_addr = http_addr
         self.http_port = http_port
         self.device = device
         self.payload = {}
         self.url = f"http://{self.http_addr}:{self.http_port}/devices/{self.device}"
+        self.testmode = testmode
 
     def query(self):
-        r = requests.get(self.url)
-        if r.status_code != requests.codes.ok:
-            print(f"ERR: received status code: {r.status_code}")
+        if self.testmode:
+            print("Testmode, not performing query")
             return {}
-        return r.json()
+        else:
+            r = requests.get(self.url)
+            if r.status_code != requests.codes.ok:
+                print(f"ERR: received status code: {r.status_code}")
+                return {}
+            return r.json()
 
     def submit(self):
-        r = requests.post(f"{self.url}/config", json=self.payload)
-        if r.status_code != requests.codes.ok:
-            print(f"ERR: received status code: {r.status_code}")
-            print("Payload that failed:")
+        if self.testmode:
+            print("Testmode enabled, payload is:")
             pprint(self.payload, indent=4)
-        return
+        else:
+            r = requests.post(f"{self.url}/config", json=self.payload)
+            if r.status_code != requests.codes.ok:
+                print(f"ERR: received status code: {r.status_code}")
+                print("Payload that failed:")
+                pprint(self.payload, indent=4)
         self.payload = {}
+        return
 
     def mainvolctl(self, level=-127.0):
         if 'master_status' not in self.payload:
@@ -35,7 +44,7 @@ class minictl():
     def inputvolctl(self, level=-100.0, input=1):
         if 'inputs' not in self.payload:
             self.payload['inputs'] = []
-        ndex = None
+        index = None
         i = 0
         for row in self.payload['inputs']:
             if row['index'] == input:

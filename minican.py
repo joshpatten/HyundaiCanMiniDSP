@@ -24,13 +24,31 @@ class G:
 	right_main_input = None
 	left_notify_input = None
 	right_notify_input = None
+	notify_level = None
+	notify_attenuate = None
 	veh_off_wait = None
 	can_bitrate = None
 	canint = None
+	reverse = None
 	q = Queue()
 	mini = None
 	config_loc = None
 	bin_loc = None
+	volume = 0
+	procs = {
+		'Proximity': [None, None],
+		'Traffic': [None, None],
+		'Beep': [None, None]
+	}
+	trafwarn = {
+		'LEFT': 0,
+		'RIGHT': 0
+	}
+	proxwarn = {
+		'LEFT': 0,
+		'RIGHT': 0,
+		'CENTER': 0
+	}
 
 # Consts
 VEH_POWER_OFF = 0
@@ -41,11 +59,88 @@ NO_OP = "NoOp"
 HU_VOLUME_STATUS = "HU_VolumeStatus"
 HU_VEHICLE_POWER = "HU_VehiclePwr"
 HU_MUTE_STATUS = "HU_MuteStatus"
+REVERSE = "C_InhibitR"
+PROX = {
+	'FRONT': {
+		'LEFT': "Pas_Spkr_Flh_Alarm",
+		'RIGHT': "Pas_Spkr_Frh_Alarm",
+		'CENTER': "Pas_Spkr_Fcnt_Alarm"
+	},
+	'REAR': {
+		'LEFT': "Pas_Spkr_Rlh_Alarm",
+		'RIGHT': "Pas_Spkr_Rrh_Alarm",
+		'CENTER': "Pas_Spkr_Rcnt_Alarm"
+	}
+}
+TRAF = {
+	'FRONT':{
+		'LEFT': "FL_SndWarn",
+		'RIGHT': "FR_SndWarn"
+	},
+	'REAR': {
+		'LEFT': "RL_SndWarn",
+		'RIGHT': "RR_SndWarn"
+	}
+}
+BEEP = "AMP_DefaultBeep1"
 INPUT = 'input'
 OUTPUT = 'output'
 MASTER = 'master'
 MINVOL = -127.0
 MAXVOL = 0
+
+def stop_aud(audtype, channel='CENTER', mute=True):
+	if G.procs[audtype][1] != None:
+		G.procs[audtype][1].kill()
+		G.procs[audtype][1] = None
+	if G.procs[audtype][0] != None:
+		G.procs[audtype][0].kill()
+		G.procs[audtype][0] = None
+	if mute:
+		input = []
+		if channel == 'CENTER':
+			input.append(G.left_notify_input)
+			input.append(G.right_notify_input)
+		elif channel == 'LEFT':
+			input.append(G.left_notify_input)
+		elif channel == 'RIGHT':
+			input.append(G.right_notify_input)
+		mute_chan(input=input)
+
+def play_aud(audtype='Beep', channel='CENTER', level=1):
+	stopproc = True
+	attenuate = True
+	if audtype == 'Beep':
+		fname = f"{G.config.get('Sounds', audtype)}.flac"
+		stopproc = False
+		attenuate = False
+	elif audtype == 'Proximity':
+		fname = f"{G.config.get('Sounds', audtype)}{level}-{channel}.flac"
+	elif audtype == 'Traffic':
+		fname = f"{G.config.get('Sounds', audtype)}{channel}.flac"
+	if stopproc:
+		stop_aud(audtype, channel=channel, mute=False)
+	p1args = [
+		G.config.get('Sounds', 'flacloc'),
+		'-c',
+		'-d',
+		fname
+	]
+	p2args = [
+		G.config.get('Sounds', 'aplayloc')
+	]
+	G.procs[audtype][0] = subprocess.Popen(
+		p1args,
+		stdout = subprocess.PIPE,
+		shell=False
+	)
+	G.procs[audtype][1] = subprocess.Popen(
+		p2args,
+		stdin = G.procs[audtype][0].stdout,
+		stdout = subprocess.PIPE,
+		shell=False
+	)
+
 
 def volume_level(level: int, max_level: int) -> float:
 	levperc = level/max_level
@@ -54,12 +149,25 @@ def volume_level(level: int, max_level: int) -> float:
 	return reduction + MINVOL
 
 
-def set_vol(inttype = MASTER, level = 0.0, input = 1):
+def set_vol(inttype=INPUT, level=0.0, input=[1]):
 	try:
 		if inttype == MASTER:
-			G.mini.mainvolctl(level)
+			G.mini.mainvolctl(level=level)
 		elif inttype == INPUT:
-			G.mini.inputvolctl(level, input)
+			for row in input:
+				G.mini.inputvolctl(level=level, input=row)
+		G.mini.submit()
+	except Exception as e:
+		print(f"Couldn't set volume for {inttype} input {input}: {e}")
+	return
+
+def mute_chan(inttype=INPUT, status=True, input=[1]):
+	try:
+		if inttype == MASTER:
+			G.mini.mutemaster(status=status)
+		elif inttype == INPUT:
+			for row in input:
+				G.mini.muteinput(status=status, input=row)
 		G.mini.submit()
 	except Exception as e:
 		print(f"Couldn't set volume for {inttype} input {input}: {e}")
@@ -84,9 +192,29 @@ def sys_shutdown():
 	sys.exit(0)
 
 def action_thread():
-	volume = 0
+	G.volume = 0
 	mute = 0
 	vpower = 9
+	G.reverse = 0
+	G.trafwarn = {
+		'LEFT': 0,
+		'RIGHT': 0,
+	}
+	G.proxwarn = {
+		'LEFT': {'level': 0, 'count': 0},
+		'RIGHT': {'level': 0, 'count': 0},
+		'CENTER': {'level': 0, 'count': 0}
+	}
+	proxlevel = {
+		"Pas_Spkr_Flh_Alarm": 0,
+		"Pas_Spkr_Frh_Alarm": 0,
+		"Pas_Spkr_Fcnt_Alarm": 0,
+		"Pas_Spkr_Rlh_Alarm": 0,
+		"Pas_Spkr_Rrh_Alarm": 0,
+		"Pas_Spkr_Rcnt_Alarm": 0
+	}
+	set_vol(level=G.notify_level, input=[G.left_notify_input, G.right_notify_input])
+	mute_chan(input=[G.left_notify_input, G.right_notify_input])
 	vtimer = datetime.now()
 	while True:
 		data = G.q.get()
@@ -96,6 +224,50 @@ def action_thread():
 			validcmd = False
 			if NO_OP in data:
 				validcmd = True
+			for channels in PROX.values():
+				for channel, cmd in channels.items():
+					if cmd in data:
+						validcmd = True
+						changed = False
+						if proxlevel[cmd] != data[cmd]:
+							logging.debug(f"Proximty alert command received: `{cmd}`, change from {proxlevel[cmd]} to {data[cmd]}, checking if alert change needed")
+							changed = True
+							proxlevel[cmd] = data[cmd]
+							if G.proxwarn[channel]['level'] < data[cmd]:
+								# Issue proximity alert
+								if max(int(d['level']) for d in G.proxwarn.values()) < data[cmd]:
+									# Higher level prox warning received
+									logging.info(f"Issuing proximity alert, {channel} channel, distance level {data[cmd]}")
+									play_aud(
+										audtype='Proximity',
+										channel=channel,
+										level=data[cmd]
+									)
+									G.proxwarn[channel]['level'] = data[cmd]
+						if max(int(d) for d in proxlevel.values()) == 0 and changed:
+							G.proxwarn['LEFT']['level'] = 0
+							G.proxwarn['RIGHT']['level'] = 0
+							G.proxwarn['CENTER']['level'] = 0
+							# Rescind proximity alert
+							logging.info(f"Rescinding all proximity alerts")
+							stop_aud('Proximity')						
+			for channels in TRAF.values():
+				for channel, cmd in channels.items():
+					if cmd in data:
+						validcmd = True
+						if G.trafwarn[channel] == 0 and data[cmd] != 0:
+							# Issue proximity alert
+							logging.info(f"Issuing traffic alert for location {channel} channel")
+							play_aud(
+								audtype='Traffic',
+								channel=channel,
+							)
+							G.trafwarn[channel] = data[cmd]
+						elif G.trafwarn[channel] != 0 and data[cmd] == 0:
+							# Rescind proximity alert
+							logging.info(f"Rescinding traffic alert for location channel {channel}")
+							stop_aud('Traffic')
+							G.trafwarn[channel] = data[cmd]
 			if HU_VEHICLE_POWER in data:
 				validcmd = True
 				if int(data[HU_VEHICLE_POWER]) == VEH_POWER_OFF and int(data[HU_VEHICLE_POWER]) != vpower:
@@ -112,12 +284,42 @@ def action_thread():
 				if (datetime.now() - timedelta(seconds=G.veh_off_wait) > vtimer):
 					logging.info(f"Vehicle has been powered off for more than {G.veh_off_wait} seconds, shutting down...")
 					sys_shutdown()
+			if BEEP in data:
+				validcmd = True
+				if data[BEEP] == 1:
+					logging.info("Playing BEEP tone")
+					play_aud()
+			if REVERSE in data:
+				validcmd = True
+				if data[REVERSE] == 1 and G.reverse != 1:
+					# We went into reverse, adjust volume
+					logging.info(f'Vehicle in reverse, setting volume to `{G.notify_attenuate}`')
+					set_vol(
+						input=[
+							G.left_main_input,
+							G.right_main_input
+						],
+						level=volume_level(
+							G.notify_attenuate,
+							G.max_vol
+						)
+					)
+					G.reverse = data[REVERSE]
+				elif data[REVERSE] != 1 and G.reverse == 1:
+					# No longer in reverse
+					logging.info(f"Vehicle no longer in reverse, reverting volume to {G.volume}")
+					data[HU_VOLUME_STATUS] = G.volume
+					G.volume = 0
+					G.reverse = data[REVERSE]
 			if HU_VOLUME_STATUS in data:
 				validcmd = True
-				if int(data[HU_VOLUME_STATUS]) != volume:
-					logging.info(f"Volume changed from {volume} to {data[HU_VOLUME_STATUS]}")
+				if int(data[HU_VOLUME_STATUS]) != G.volume:
+					logging.info(f"Volume changed from {G.volume} to {data[HU_VOLUME_STATUS]}")
 					set_vol(
-						index=G.output_device,
+						input=[
+							G.left_main_input,
+							G.right_main_input
+						],
 						level=volume_level(
 							int(
 								data[HU_VOLUME_STATUS]
@@ -125,7 +327,7 @@ def action_thread():
 							G.max_vol
 						)
 					)
-					volume = data[HU_VOLUME_STATUS]
+					G.volume = data[HU_VOLUME_STATUS]
 			if HU_MUTE_STATUS in data:
 				validcmd = True
 				if int(data[HU_MUTE_STATUS]) != mute:
@@ -133,20 +335,43 @@ def action_thread():
 					# Set to previous volume level
 					if int(data[HU_MUTE_STATUS]) == MUTE_OFF:
 						set_vol(
-							index=G.output_device,
+							input=[
+								G.left_main_input,
+								G.right_main_input
+							],
 							level=volume_level(
-								volume,
+								G.volume,
 								G.max_vol
 							)
 						)
+						mute_chan(
+							status=False,
+							input = [
+								G.right_main_input,
+								G.left_main_input
+							]
+						)
 					else:
+						mute_chan(
+							input = [
+								G.right_main_input,
+								G.left_main_input
+							]
+						)
 						set_vol(
-							index=G.output_device,
-							level=0.0
+							input=[
+								G.left_main_input,
+								G.right_main_input
+							],
+							level=volume_level(
+								0,
+								G.max_vol
+							)
 						)
 					mute = int(data[HU_MUTE_STATUS])
 			if not validcmd:
-				logging.debug(f"Command not usable, skipping processing: `{pformat(data)}`")
+				pass
+				#logging.debug(f"Command not usable, skipping processing: `{pformat(data)}`")
 
 def listen_loop(test):	
 	logging.info('Test mode set, performing test commands')
@@ -179,12 +404,13 @@ def listen_loop(test):
 		msg = G.canint.recv(10.0)
 		try:
 			data = G.db.decode_message(msg.arbitration_id, msg.data)
-			logging.debug(f"CANBUS message received with the following data: `{pformat(data)}`")
+			#logging.debug(f"CANBUS message received with the following data: `{pformat(data)}`")
 			G.q.put(data)
 		except (KeyError, AttributeError):
-			logging.debug(f"Unknown CANBUS message received: `{pformat(msg)}`")
+			pass
+			#logging.debug(f"Unknown CANBUS message received: `{pformat(msg)}`")
 		if msg is None:
-			logging.debug("No CANBUS message received, sending `NO_OP` to queue")
+			#logging.debug("No CANBUS message received, sending `NO_OP` to queue")
 			G.q.put({NO_OP: 0})
 	
 def main(test=False):
@@ -206,19 +432,24 @@ def main(test=False):
 	G.left_notify_input = int(G.config.get('MiniDSP', 'notify_left'))
 	logging.debug(f"Setting right notification input to input `{G.config.get('MiniDSP', 'notify_right')}`")
 	G.right_notify_input = int(G.config.get('MiniDSP', 'notify_right'))
+	logging.debug(f"Setting notification input level to `{G.config.get('MiniDSP', 'notify_level')}`")
+	G.notify_level = int(G.config.get('MiniDSP', 'notify_level'))
+	logging.debug(f"Setting main input attenauation level on notification to `{G.config.get('MiniDSP', 'notify_attenuate')}`")
+	G.notify_attenuate = int(G.config.get('MiniDSP', 'notify_attenuate'))
 	logging.debug(f"Setting minidsp-rs config location to `{G.config.get('MiniDSP', 'config_loc')}`")
 	G.config_loc = G.config.get('MiniDSP', 'config_loc')
 	logging.debug(f"Setting minidsp-rs binary location to `{G.config.get('MiniDSP', 'bin_loc')}`")
 	G.bin_loc = G.config.get('MiniDSP', 'bin_loc')
 	logging.debug('Initializing minidsp-rs SDK')
-	G.mini = minictl()
-	command = f"{G.bin_loc} --config {G.config_loc}"
+	testmode = G.config.getboolean('MiniDSP', 'testmode')
+	G.mini = minictl(testmode=testmode)
+	command = [G.bin_loc, '--config', G.config_loc]
 	try:
 		success = can_init(G.candev)
 		if not success:
 			return 100
 		logging.debug('Starting minidsp-rs daemon')
-		proc = subprocess.Popen([command])
+		proc = subprocess.Popen(command)
 		logging.debug('Spawning CANBUS command processing thread')
 		d = Thread(target=action_thread)
 		d.daemon = True
